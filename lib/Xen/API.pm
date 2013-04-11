@@ -50,7 +50,7 @@ our @EXPORT_OK=qw(bool true false string Int i4 i8 double datetime
 our %EXPORT_TAGS=(all=>\@EXPORT_OK);
 our $PACKAGE_PREFIX = __PACKAGE__;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 =head2 prompt
 
@@ -683,8 +683,9 @@ List the templates on this Xen server.
 
 sub list_templates {
   my $self = shift or return;
+  my $vbds_only = shift;
   my %vms = %{$self->Xen::API::VM::get_all_records||{}};
-  my @templates = grep {$vms{$_}{is_a_template} && @{$vms{$_}{VBDs}||[]}} keys %vms;
+  my @templates = grep {$vms{$_}{is_a_template} && (!$vbds_only || @{$vms{$_}{VBDs}||[]})} keys %vms;
   return map {{
     name_label=>$vms{$_}{name_label},
     uuid=>$vms{$_}{uuid},
@@ -739,7 +740,7 @@ Ben Booth, benwbooth@gmail.com
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2012 by Ben Booth
+Copyright (C) 2013 by Ben Booth
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.10.1 or,
