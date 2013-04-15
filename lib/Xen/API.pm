@@ -50,7 +50,7 @@ our @EXPORT_OK=qw(bool true false string Int i4 i8 double datetime
 our %EXPORT_TAGS=(all=>\@EXPORT_OK);
 our $PACKAGE_PREFIX = __PACKAGE__;
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 =head2 prompt
 
@@ -160,132 +160,156 @@ EOS
 Create a new VM. 
 
 Arguments:
-
     - vmname - The xen name of the VM.
     - template - The template to base the VM from.
     - cpu - How many CPUs to assign
     - memory - How much memory to assign
-    - hostname - The hostname to set. Works for Debian/Ubuntu and RedHat/CentOS only.
-    - sudo - Should sudo be used to edit the hostname config file?
-    - user - SSH user name for editing the hostname config file
-    - password - SSH password for editing the hostname config file
-    - port - SSH port for editing the hostname config file
 
 Returns a ref to the newly created VM.
 
 =cut
 
-BEGIN {
-  my $lastpassword;
-  sub create_vm {
-    my $self = shift or return;
+sub create_vm {
+  my $self = shift or return;
 
-    # read arguments
-    my %args = @_;
-    my $sudo=exists $args{sudo}?$args{sudo}:1;
-    my $user = $args{user};
-    $sudo=1 if !defined($sudo) && $user ne 'root';
-    my $password = exists $args{password}?$args{password}:$lastpassword;
-    my $vmname = defined $args{vmname}?$args{vmname}:$args{hostname};
-    my $hostname = $args{hostname};
-    my $port = $args{port};
-    my $cpu=$args{cpu};
-    my $memory=$args{memory};
-    my $template = $args{template} or return;
-    die "No VM name given" if !defined $vmname;
+  # read arguments
+  my %args = @_;
+  my $vmname = $args{vmname};
+  my $template = $args{template};
+  die "No template name given" if !defined $template;
+  my $cpu=$args{cpu};
+  my $memory=$args{memory};
+  die "No VM name given" if !defined $vmname;
 
-    # prompt for password
-    if (defined($hostname) && !defined($password)) {
-      $password = prompt("Enter login password to set hostname: ");
-    }
-    $lastpassword = $password;
+  # get the list of VMs and templates in this pool
+  my %vms = %{$self->Xen::API::VM::get_all_records||{}};
+  my @templates = grep {$vms{$_}{is_a_template} && @{$vms{$_}{VBDs}||[]}} keys %vms;
 
-    # get the list of VMs and templates in this pool
-    my %vms = %{$self->Xen::API::VM::get_all_records||{}};
-    my @templates = grep {$vms{$_}{is_a_template} && @{$vms{$_}{VBDs}||[]}} keys %vms;
+  # query for the template by name or uuid
+  my @use_template = grep {
+    $vms{$_}{name_label} eq $template
+      || $vms{$_}{uuid} eq $template
+      || $_ eq $template} @templates;
+  die "No template named \"$template\"!\n" if !@use_template;
+  die "Multiple templates found matching \"$template\":\n"
+    .join(', ',map {"\"$vms{$_}{name_label}\" ($vms{$_}{uuid})"} @use_template) 
+    if @use_template>1;
+  my $use_template = $use_template[0];
 
-    # query for the template by name or uuid
-    my @use_template = grep {
-      $vms{$_}{name_label} eq $template
-        || $vms{$_}{uuid} eq $template
-        || $_ eq $template} @templates;
-    die "No template named \"$template\"!\n" if !@use_template;
-    die "Multiple templates found matching \"$template\":\n"
-      .join(', ',map {"\"$vms{$_}{name_label}\" ($vms{$_}{uuid})"} @use_template) 
-      if @use_template>1;
-    my $use_template = $use_template[0];
+  # clone the template into a new VM
+  my $new_vm = $self->Xen::API::VM::clone($use_template,$vmname);
 
-    # clone the template into a new VM
-    my $new_vm = $self->Xen::API::VM::clone($use_template,$vmname);
+  # set number of VCPUs
+  if (defined($cpu)) {
+    $self->Xen::API::VM::set_VCPUs_max($new_vm,$cpu);
+    $self->Xen::API::VM::set_VCPUs_at_startup($new_vm,$cpu);
+  }
 
-    # set number of VCPUs
-    if (defined($cpu)) {
-      $self->Xen::API::VM::set_VCPUs_max($new_vm,$cpu);
-      $self->Xen::API::VM::set_VCPUs_at_startup($new_vm,$cpu);
-    }
+  # set memory. There seem to be two mutually incompatible APIs: One used by
+  # XenAPI 6.1, and another for earlier XenAPI versions. Try both, and
+  # hopefully one of them will succeed.
+  if (defined($memory)) {
+    my $mem = unformat_number($memory);
 
-    # set memory. There seem to be two mutually incompatible APIs: One used by
-    # XenAPI 6.1, and another for earlier XenAPI versions. Try both, and
-    # hopefully one of them will succeed.
-    if (defined($memory)) {
-      my $mem = unformat_number($memory);
-
-      # new API, try this first
-      my @err;
+    # new API, try this first
+    my @err;
+    eval {
+      $self->Xen::API::VM::set_memory_limits($new_vm,$mem,$mem,$mem,$mem);
+    };
+    if ($@) {
+      push @err, $@;
+      # try the old API if the new API call fails
       eval {
-        $self->Xen::API::VM::set_memory_limits($new_vm,$mem,$mem,$mem,$mem);
+        $self->Xen::API::VM::set_memory_dynamic_min($new_vm,$mem);
+        $self->Xen::API::VM::set_memory_dynamic_max($new_vm,$mem);
+        $self->Xen::API::VM::set_memory_static_min($new_vm,$mem);
+        $self->Xen::API::VM::set_memory_static_max($new_vm,$mem);
       };
       if ($@) {
         push @err, $@;
-        # try the old API if the new API call fails
-        eval {
-          $self->Xen::API::VM::set_memory_dynamic_min($new_vm,$mem);
-          $self->Xen::API::VM::set_memory_dynamic_max($new_vm,$mem);
-          $self->Xen::API::VM::set_memory_static_min($new_vm,$mem);
-          $self->Xen::API::VM::set_memory_static_max($new_vm,$mem);
-        };
-        if ($@) {
-          push @err, $@;
-          die "Could not set memory for $vmname: \n".join("\n",@err);
-        }
+        die "Could not set memory for $vmname: \n".join("\n",@err);
       }
     }
+  }
 
-    # provision the VM
-    $self->Xen::API::VM::provision($new_vm);
+  # provision the VM
+  $self->Xen::API::VM::provision($new_vm);
 
-    # start the VM
-    $self->Xen::API::VM::start($new_vm,false,true); 
+  # start the VM
+  $self->Xen::API::VM::start($new_vm,false,true); 
 
-    # set the hostname using SSH. This step is distro-specific, so try everything
-    # and see what sticks.
-    if (defined $hostname) { 
-      # get the IP
-      my $ip = $self->get_ip($new_vm);
+  my $ip = $self->get_ip($new_vm);
+  print STDERR "IP address for $vmname: $ip\n";
+  return $new_vm;
+}
 
-      my $ssh = Net::OpenSSH->new($ip, 
-        defined($user)?(user=>$user):(), 
-        defined($password)?(password=>$password):(),
-        defined($port)?(port=>$port):(),
-        master_opts=>[-o=>'StrictHostKeyChecking=no'],
-      );
-      die "Couldn't establish SSH connection: ".$ssh->error if $ssh->error;
-      if ($sudo) {
-        $ssh->system({stdin_data=>"$password\n", quote_args=>1, stderr_discard=>1},
-          'sudo','-Sk','-p','--','sed','-ri','1,1s#^.*$#'.$hostname.'#','/etc/hostname');
-        $ssh->system({stdin_data=>"$password\n", quote_args=>1, stderr_discard=>1},
-          'sudo','-Sk','-p','--','sed','-ri','s#^HOSTNAME=.*#HOSTNAME='.$hostname.'#','/etc/sysconfig/network');
-      }
-      else {
-        $ssh->system({quote_args=>1, stderr_discard=>1},
-          'sed','-ri','1,1s#^.*$#'.$hostname.'#','/etc/hostname');
-        $ssh->system({quote_args=>1, stderr_discard=>1},
-          'sed','-ri','s#^HOSTNAME=.*#HOSTNAME='.$hostname.'#','/etc/sysconfig/network');
-      }
-      # reboot to set the new host name
-      $self->Xen::API::VM::clean_reboot($new_vm);
+=head2 script
+
+Run a remote script on a VM guest over SSH.
+
+Arguments:
+  - script - Remote script file to run on the guest via SSH
+  - vmname - Name of the VM where the script should be run
+  - user - SSH user name for running a remote command on the guest
+  - password - SSH password for running a remote command on the guest
+  - port - SSH port for running a remote command on the guest
+  - sudo - Should sudo be used to run a remote command on the guest?
+
+=cut
+
+BEGIN {
+  my $lastpassword;
+  sub script {
+    my $self = shift or return;
+    my %args = @_;
+    my $vmname = $args{vmname} or return;
+    my $script = $args{script};
+    my $command = $args{command};
+    my $user = $args{user};
+    my $port = $args{port};
+    my $sudo = $args{sudo};
+    my $password = exists($args{password})?$args{password}:$lastpassword;
+    die "No command or script was given" if !defined($command) && !defined($script);
+
+    # find the VM
+    my %vms = %{$self->Xen::API::VM::get_all_records||{}};
+    my @vms = grep {$vms{$_}{name_label} eq $vmname
+        || $vms{$_}{uuid} eq $vmname
+        || $_ eq $vmname} keys %vms;
+    die "Multiple VMs matched $vmname" if @vms > 1;
+    my $vm = $vms[0] or die "Could not find vm $vmname";
+    die "VM $vmname is not running" if ($vms{$vm}{power_state}||'') ne 'Running';
+
+    # prompt for password
+    if ((exists($args{password}) || $sudo) && !defined($password)) {
+      $password = prompt("Enter login password: ");
     }
-    return $new_vm;
+    $lastpassword = $password;
+
+    my $ip = $self->get_ip($vm)
+      or die "Could not determine IP address of $vmname";
+
+    # read the contents of the file to a string
+    if (defined($script) && !defined($command)) {
+      die "Could not read script file $script" if !-r $script;
+      $command = do {local(@ARGV, $/) = $script; <>};
+    }
+
+    # Run the remote command using SSH.
+    my $ssh = Net::OpenSSH->new($ip, 
+      defined($user)?(user=>$user):(), 
+      defined($password)?(password=>$password):(),
+      defined($port)?(port=>$port):(),
+      master_opts=>[-o=>'StrictHostKeyChecking=no'],
+    );
+    die "Couldn't establish SSH connection: ".$ssh->error if $ssh->error;
+    if ($sudo) {
+      $ssh->system({stdin_data=>"$password\n$command"},
+        'sudo -Sk -p "" -- "$SHELL"');
+    }
+    else {
+      $ssh->system({stdin_data=>$command}, '"$SHELL"');
+    }
   }
 }
 
