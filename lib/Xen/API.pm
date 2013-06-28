@@ -50,7 +50,7 @@ our @EXPORT_OK=qw(bool true false string Int i4 i8 double datetime
 our %EXPORT_TAGS=(all=>\@EXPORT_OK);
 our $PACKAGE_PREFIX = __PACKAGE__;
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 =head2 prompt
 
@@ -248,12 +248,12 @@ sub create_vm {
 Run a remote script on a VM guest over SSH.
 
 Arguments:
-  - script - Remote script file to run on the guest via SSH
-  - vmname - Name of the VM where the script should be run
-  - user - SSH user name for running a remote command on the guest
-  - password - SSH password for running a remote command on the guest
-  - port - SSH port for running a remote command on the guest
-  - sudo - Should sudo be used to run a remote command on the guest?
+    - script - Remote script file to run on the guest via SSH
+    - vmname - Name of the VM where the script should be run
+    - user - SSH user name for running a remote command on the guest
+    - password - SSH password for running a remote command on the guest
+    - port - SSH port for running a remote command on the guest
+    - sudo - Should sudo be used to run a remote command on the guest?
 
 =cut
 
